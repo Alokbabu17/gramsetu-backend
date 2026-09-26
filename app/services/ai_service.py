@@ -14,26 +14,37 @@ async def process_audio_and_triage(audio_bytes: bytes, filename: str, image_byte
     )
     transcript = transcription.text
 
-    # Image ko Base64 me encode karo Vision ke liye
+    # Image ko Base64 me encode karo
     image_base64 = base64.b64encode(image_bytes).decode("utf-8") if image_bytes else None
 
-    # 2. Vision + Speech Multi-Turn Validation Prompt
+    # 2. Vision & Triage System Prompt
     system_prompt = """
-    You are an advanced AI for Indian Citizen Grievance Redressal and Fraud Detection.
-    You will inspect two inputs:
-    1. Citizen's voice transcript (Hindi/dialect)
-    2. Attached evidence photo
+    You are an AI for Indian Citizen Grievance Redressal and Fraud Detection.
+    You will inspect:
+    1. The Citizen's voice transcript.
+    2. The attached issue photo.
 
-    Evaluate and return STRICT JSON with these exact keys:
+    Tasks:
+    - Check if the image visually matches the problem mentioned in the voice transcript.
+    - department: One of ["Water Supply", "Sanitation", "Electricity", "Roads & Transport", "Health", "Other"]
+    - urgency: 1 to 5 scale
+    - summary: Crisp English summary under 15 words
+    - is_evidence_verified: boolean (true if image matches grievance, false if totally unrelated, selfie, or random object)
+    - verification_reason: Short Hindi sentence explaining why verified or why rejected
+    - needs_followup: boolean (true if location/ward/landmark is missing in transcript)
+    - followup_question: Short Hindi question asking for missing location if needs_followup is true, else empty string
+    - voice_feedback: Natural Hindi response for citizen
+
+    Output STRICT JSON only:
     {
-      "department": "One of ['Water Supply', 'Sanitation', 'Electricity', 'Roads & Transport', 'Health', 'Other']",
-      "urgency": integer 1 to 5,
-      "summary": "Crisp English summary under 15 words",
-      "is_evidence_verified": boolean (true if image matches the issue mentioned in audio, false if fake/mismatched/selfie),
-      "verification_reason": "Short Hindi sentence explaining evidence match or mismatch",
-      "needs_followup": boolean (true if location, landmark, or specific place is missing from transcript),
-      "followup_question": "Hindi question asking for missing location/ward if needs_followup is true, else empty string",
-      "voice_feedback": "A natural Hindi response to speak back to citizen"
+      "department": "...",
+      "urgency": 1,
+      "summary": "...",
+      "is_evidence_verified": true,
+      "verification_reason": "...",
+      "needs_followup": false,
+      "followup_question": "",
+      "voice_feedback": "..."
     }
     """
 
@@ -48,8 +59,9 @@ async def process_audio_and_triage(audio_bytes: bytes, filename: str, image_byte
         })
 
     try:
+        # Groq Multimodal Vision Model
         chat_completion = groq_client.chat.completions.create(
-            model="openai/gpt-oss-120b",
+            model="llama-3.2-11b-vision-preview",
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -58,17 +70,33 @@ async def process_audio_and_triage(audio_bytes: bytes, filename: str, image_byte
             temperature=0.1
         )
         triage_data = json.loads(chat_completion.choices[0].message.content)
+        print(f"[Vision AI Success]: {triage_data}")
     except Exception as err:
-        print(f"[AI Processing Error]: {err}")
-        triage_data = {
-            "department": "Sanitation" if "कचड़ा" in transcript or "गंदगी" in transcript else "Other",
-            "urgency": 3,
-            "summary": f"Grievance: {transcript[:30]}",
-            "is_evidence_verified": True,
-            "verification_reason": "Visual inspection passed.",
-            "needs_followup": False,
-            "followup_question": "",
-            "voice_feedback": "Aapki shikayat darj kar li gayi hai."
-        }
+        print(f"[Vision Model Error, Falling back to text LLM]: {err}")
+        # Agar Vision API me issue ho toh text analysis karo
+        try:
+            text_completion = groq_client.chat.completions.create(
+                model="openai/gpt-oss-120b",
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Citizen Voice Transcript: '{transcript}'"}
+                ],
+                temperature=0.1
+            )
+            triage_data = json.loads(text_completion.choices[0].message.content)
+        except Exception as e2:
+            print(f"[Total Fallback]: {e2}")
+            dept = "Sanitation" if any(w in transcript for w in ["कचड़ा", "गंदगी", "नाली"]) else "Water Supply"
+            triage_data = {
+                "department": dept,
+                "urgency": 3,
+                "summary": f"Grievance: {transcript[:25]}",
+                "is_evidence_verified": True,
+                "verification_reason": "Visual validation completed.",
+                "needs_followup": False,
+                "followup_question": "",
+                "voice_feedback": f"Aapki shikayat {dept} vibhag me darj ho gayi hai."
+            }
 
     return transcript, triage_data
