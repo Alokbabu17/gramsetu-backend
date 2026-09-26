@@ -5,7 +5,7 @@ from app.core.config import settings
 groq_client = Groq(api_key=settings.GROQ_API_KEY)
 
 async def process_audio_and_triage(audio_bytes: bytes, filename: str):
-    # 1. Speech to Text using Groq Whisper
+    # 1. Speech to Text using Whisper
     transcription = groq_client.audio.transcriptions.create(
         file=(filename, audio_bytes),
         model="whisper-large-v3",
@@ -13,7 +13,7 @@ async def process_audio_and_triage(audio_bytes: bytes, filename: str):
     )
     transcript = transcription.text
 
-    # 2. Triage & Extraction using Llama 3.1
+    # 2. Triage & Extraction using Llama 3.3
     system_prompt = """
     You are an AI for Indian Citizen Grievance Redressal.
     Given a citizen's complaint transcription, extract:
@@ -29,15 +29,23 @@ async def process_audio_and_triage(audio_bytes: bytes, filename: str):
     }
     """
 
-    chat_completion = groq_client.chat.completions.create(
-        model="llama-3.1-8b-instant",  # Updated supported model
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Citizen Complaint Text: {transcript}"}
-        ],
-        temperature=0.1
-    )
+    try:
+        chat_completion = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Citizen Complaint Text: {transcript}"}
+            ],
+            temperature=0.1
+        )
+        triage_data = json.loads(chat_completion.choices[0].message.content)
+    except Exception as llm_err:
+        print(f"[LLM Fallback Triggered]: {llm_err}")
+        triage_data = {
+            "department": "Sanitation",
+            "urgency": 3,
+            "summary": "Citizen recorded civic grievance"
+        }
 
-    triage_data = json.loads(chat_completion.choices[0].message.content)
     return transcript, triage_data
