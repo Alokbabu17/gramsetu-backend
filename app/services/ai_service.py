@@ -5,15 +5,15 @@ from app.core.config import settings
 groq_client = Groq(api_key=settings.GROQ_API_KEY)
 
 async def process_audio_and_triage(audio_bytes: bytes, filename: str):
-    # 1. Speech to Text using Groq Whisper (Zero local RAM overhead)
+    # 1. Speech to Text using Groq Whisper
     transcription = groq_client.audio.transcriptions.create(
         file=(filename, audio_bytes),
         model="whisper-large-v3",
-        language="hi"  # Hindi audio handle karega
+        language="hi"
     )
     transcript = transcription.text
 
-    # 2. Triage & Extraction using Llama-3-8B
+    # 2. Triage & Extraction using Llama 3.1
     system_prompt = """
     You are an AI for Indian Citizen Grievance Redressal.
     Given a citizen's complaint transcription, extract:
@@ -30,7 +30,7 @@ async def process_audio_and_triage(audio_bytes: bytes, filename: str):
     """
 
     chat_completion = groq_client.chat.completions.create(
-        model="llama3-8b-8192",
+        model="llama-3.1-8b-instant",  # Updated supported model
         response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": system_prompt},
