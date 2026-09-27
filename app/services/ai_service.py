@@ -3,12 +3,26 @@ from groq import Groq
 import google.generativeai as genai
 from app.core.config import settings
 
-# 1. Groq Client (Fast Speech-to-Text)
+# 1. Groq Client (Speech-to-Text)
 groq_client = Groq(api_key=settings.GROQ_API_KEY)
 
-# 2. Gemini Vision Configuration
+# 2. Gemini Configuration
 if settings.GEMINI_API_KEY:
     genai.configure(api_key=settings.GEMINI_API_KEY)
+
+def get_gemini_vision_model():
+    """GenerativeModel ke liye supported vision model resolve karta hai."""
+    try:
+        available = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        for name in available:
+            if "flash" in name:
+                return genai.GenerativeModel(name)
+        for name in available:
+            if "gemini" in name:
+                return genai.GenerativeModel(name)
+    except Exception as e:
+        print(f"[Gemini ListModels Fallback]: {e}")
+    return genai.GenerativeModel("gemini-1.5-flash-latest")
 
 async def process_audio_and_triage(
     audio_bytes: bytes,
@@ -26,10 +40,10 @@ async def process_audio_and_triage(
     full_transcript = f"{previous_context} | {current_transcript}".strip(" | ") if previous_context else current_transcript
     print(f"[Audio Transcript]: {full_transcript}")
 
-    # Step B: Gemini 1.5 Flash Vision Multimodal Verification
+    # Step B: Gemini Flash Vision Verification
     if settings.GEMINI_API_KEY and image_bytes:
         try:
-            model = genai.GenerativeModel("gemini-1.5-flash")
+            model = get_gemini_vision_model()
             
             prompt = f"""
             You are an AI Civic Redressal Inspector and Fraud Detection Officer for Rural India (GramSetu).
@@ -85,8 +99,8 @@ async def process_audio_and_triage(
         except Exception as e:
             print(f"[Gemini Vision Error]: {e}")
 
-    # Fallback if Gemini unavailable
-    dept = "Sanitation" if any(w in full_transcript for w in ["कचड़ा", "गंदगी", "नाली"]) else "Water Supply"
+    # Fallback
+    dept = "Water Supply" if any(w in full_transcript for w in ["पानी", "नल", "हैंड पंप", "जल"]) else "Sanitation"
     triage_data = {
         "department": dept,
         "urgency": 3,
