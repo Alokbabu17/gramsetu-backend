@@ -1,5 +1,4 @@
 import json
-import base64
 from groq import Groq
 from app.core.config import settings
 
@@ -27,43 +26,41 @@ async def process_audio_and_triage(
         model="whisper-large-v3",
         language="hi"
     )
-    current_text = transcription.text
+    current_text = transcription.text.strip()
     full_transcript = f"{previous_context} | {current_text}".strip(" | ") if previous_context else current_text
 
-    # 2. Strict Guardrail Evaluation Prompt
+    # 2. Sensible Triage Prompt
     system_prompt = """
-    You are an AI Civic Grievance & Evidence Inspector for Rural India.
-    Your #1 priority is FRAUD DETECTION & AUTHENTICITY.
+    You are an AI Civic Redressal Inspector for Indian rural governance (GramSetu).
+    You are reviewing a citizen's complaint transcript.
 
-    STRICT OPERATING RULES:
-    1. Check the grievance topic (e.g. Handpump/water, Garbage/cleanliness, Road/pothole, Electricity).
-    2. If the user provided photo or description does NOT match real ground civic infrastructure (e.g. laptop screen, coding, indoor room, random object, selfie), you MUST:
-       - "is_evidence_verified": false
-       - "needs_followup": false
-       - "verification_reason": "Evidence photo does not show civic physical issue matching the problem."
-       - "voice_feedback": "Dhyan dein, aapki photo aapki samasya se match nahi ho rahi hai. Kripya asli samasya ki photo khinchein."
-       - NEVER set "needs_followup": true when evidence is unverified or mismatched. REJECT IMMEDIATELY.
+    RULES:
+    1. If the transcript discusses legitimate civic issues (Garbage, Waste, Handpump, Water, Broken Road, Drainage, Streetlight, Electricity, Health):
+       - "is_evidence_verified": true
+       - "verification_reason": "Nagrik ki shikayat civic mudde se sambandhit hai."
+       - Classify proper department: ["Sanitation", "Water Supply", "Roads & Transport", "Electricity", "Health", "Other"]
+       - "urgency": 1 to 5
+       - "voice_feedback": "Aapki shikayat safalta-purvak darj kar li gayi hai."
 
-    3. ONLY IF evidence looks authentic:
-       - Check if location/ward/landmark is mentioned in the full transcript.
-       - If location is missing:
-         "needs_followup": true
-         "followup_question": "Kripya batayein ye samasya kaunse ward me ya kiske ghar ke paas hai?"
-         "voice_feedback": "Kripya batayein ye samasya kaunse ward me ya kiske ghar ke paas hai?"
-       - If location is present:
-         "needs_followup": false
-         "voice_feedback": "Aapki shikayat darj kar li gayi hai."
+    2. ONLY mark "is_evidence_verified": false IF:
+       - The transcript is completely gibberish, empty, random personal talk, or intentional abusive spam unrelated to any village issue.
+       - If rejected:
+         "verification_reason": "Shikayat me gaon ki kisi samasya ka vivaran nahi hai."
+         "voice_feedback": "Kripya gaon ki kisi mukhya samasya ke baare me saaf aawaaz me batayein."
 
-    Output STRICT JSON:
+    3. Needs Followup:
+       - Always set "needs_followup": false for now to avoid blocking genuine rural complaints.
+
+    Output STRICT JSON only:
     {
-      "department": "One of ['Water Supply', 'Sanitation', 'Electricity', 'Roads & Transport', 'Health', 'Other']",
-      "urgency": 1 to 5,
-      "summary": "Crisp summary under 15 words",
-      "is_evidence_verified": true or false,
-      "verification_reason": "Reason in Hindi",
-      "needs_followup": true or false,
-      "followup_question": "Question or empty",
-      "voice_feedback": "Hindi voice feedback"
+      "department": "Sanitation / Water Supply / etc",
+      "urgency": 3,
+      "summary": "Crisp summary under 12 words",
+      "is_evidence_verified": true,
+      "verification_reason": "...",
+      "needs_followup": false,
+      "followup_question": "",
+      "voice_feedback": "..."
     }
     """
 
@@ -74,22 +71,31 @@ async def process_audio_and_triage(
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Citizen Grievance Full Transcript: '{full_transcript}'"}
+                {"role": "user", "content": f"Citizen Complaint Transcript: '{full_transcript}'"}
             ],
             temperature=0.1
         )
         triage_data = json.loads(chat_completion.choices[0].message.content)
     except Exception as err:
         print(f"[AI Evaluation Error]: {err}")
+        # Rule based sensible fallback
+        dept = "Sanitation"
+        if any(w in full_transcript for w in ["पानी", "नल", "हैंड पंप", "जल"]):
+            dept = "Water Supply"
+        elif any(w in full_transcript for w in ["सड़क", "रास्ता", "गड्ढा"]):
+            dept = "Roads & Transport"
+        elif any(w in full_transcript for w in ["बिजली", "लाइट", "तार"]):
+            dept = "Electricity"
+
         triage_data = {
-            "department": "Other",
+            "department": dept,
             "urgency": 3,
-            "summary": full_transcript[:25],
-            "is_evidence_verified": False,
-            "verification_reason": "Jaanch me asafal. Kripya punah photo lein.",
+            "summary": full_transcript[:30],
+            "is_evidence_verified": True,
+            "verification_reason": "Shikayat darj ki gayi.",
             "needs_followup": False,
             "followup_question": "",
-            "voice_feedback": "Photo ki jaanch nahi ho saki. Sahi photo punah khinchein."
+            "voice_feedback": f"Aapki shikayat {dept} vibhag me darj ho gayi hai."
         }
 
     return full_transcript, triage_data
