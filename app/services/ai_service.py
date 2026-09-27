@@ -1,18 +1,14 @@
 import json
 from groq import Groq
+import google.generativeai as genai
 from app.core.config import settings
 
+# 1. Groq Client (Fast Speech-to-Text)
 groq_client = Groq(api_key=settings.GROQ_API_KEY)
 
-def get_active_model() -> str:
-    try:
-        models = [m.id for m in groq_client.models.list().data]
-        for preferred in ["llama-3.3-70b-versatile", "openai/gpt-oss-120b", "llama-3.1-8b-instant"]:
-            if preferred in models:
-                return preferred
-        return models[0]
-    except Exception:
-        return "llama-3.3-70b-versatile"
+# 2. Gemini Vision Configuration
+if settings.GEMINI_API_KEY:
+    genai.configure(api_key=settings.GEMINI_API_KEY)
 
 async def process_audio_and_triage(
     audio_bytes: bytes,
@@ -20,82 +16,85 @@ async def process_audio_and_triage(
     image_bytes: bytes = None,
     previous_context: str = ""
 ):
-    # 1. Groq Whisper STT
+    # Step A: Whisper Audio Transcription via Groq
     transcription = groq_client.audio.transcriptions.create(
         file=(filename, audio_bytes),
         model="whisper-large-v3",
         language="hi"
     )
-    current_text = transcription.text.strip()
-    full_transcript = f"{previous_context} | {current_text}".strip(" | ") if previous_context else current_text
+    current_transcript = transcription.text.strip()
+    full_transcript = f"{previous_context} | {current_transcript}".strip(" | ") if previous_context else current_transcript
+    print(f"[Audio Transcript]: {full_transcript}")
 
-    # 2. Sensible Triage Prompt
-    system_prompt = """
-    You are an AI Civic Redressal Inspector for Indian rural governance (GramSetu).
-    You are reviewing a citizen's complaint transcript.
+    # Step B: Gemini 1.5 Flash Vision Multimodal Verification
+    if settings.GEMINI_API_KEY and image_bytes:
+        try:
+            model = genai.GenerativeModel("gemini-1.5-flash")
+            
+            prompt = f"""
+            You are an AI Civic Redressal Inspector and Fraud Detection Officer for Rural India (GramSetu).
+            Analyze both:
+            1. The citizen's voice grievance: "{full_transcript}"
+            2. The attached evidence image.
 
-    RULES:
-    1. If the transcript discusses legitimate civic issues (Garbage, Waste, Handpump, Water, Broken Road, Drainage, Streetlight, Electricity, Health):
-       - "is_evidence_verified": true
-       - "verification_reason": "Nagrik ki shikayat civic mudde se sambandhit hai."
-       - Classify proper department: ["Sanitation", "Water Supply", "Roads & Transport", "Electricity", "Health", "Other"]
-       - "urgency": 1 to 5
-       - "voice_feedback": "Aapki shikayat safalta-purvak darj kar li gayi hai."
+            Tasks:
+            1. What is physically visible in this image? (e.g., trash dump, broken handpump, pothole, laptop screen, selfie, animal, indoor room).
+            2. Cross-Verification: Does the image show the physical civic problem mentioned in the transcript?
+               - If audio says handpump/water and image shows garbage/laptop/selfie/indoor room -> is_evidence_verified MUST BE false.
+               - If audio says garbage/kachra and image shows garbage/dump -> is_evidence_verified MUST BE true.
+               - If audio says road broken and image shows road/potholes -> is_evidence_verified MUST BE true.
+            3. Department: One of ["Water Supply", "Sanitation", "Electricity", "Roads & Transport", "Health", "Other"]
+            4. Urgency: integer 1 to 5.
+            5. Summary: Crisp English summary under 12 words.
+            6. Verification Reason: 1 clear Hindi sentence explaining why it passed or failed.
+            7. Voice Feedback: Natural Hindi response for the citizen.
 
-    2. ONLY mark "is_evidence_verified": false IF:
-       - The transcript is completely gibberish, empty, random personal talk, or intentional abusive spam unrelated to any village issue.
-       - If rejected:
-         "verification_reason": "Shikayat me gaon ki kisi samasya ka vivaran nahi hai."
-         "voice_feedback": "Kripya gaon ki kisi mukhya samasya ke baare me saaf aawaaz me batayein."
+            Output STRICT JSON ONLY (no markdown blocks, no backticks, just raw json):
+            {{
+              "department": "Sanitation",
+              "urgency": 3,
+              "summary": "Garbage accumulated by roadside",
+              "is_evidence_verified": true,
+              "verification_reason": "Tasveer me kachra saaf dikh raha hai jo shikayat se match karta hai.",
+              "needs_followup": false,
+              "followup_question": "",
+              "voice_feedback": "Aapki shikayat darj kar li gayi hai."
+            }}
+            """
 
-    3. Needs Followup:
-       - Always set "needs_followup": false for now to avoid blocking genuine rural complaints.
+            image_part = {
+                "mime_type": "image/jpeg",
+                "data": image_bytes
+            }
 
-    Output STRICT JSON only:
-    {
-      "department": "Sanitation / Water Supply / etc",
-      "urgency": 3,
-      "summary": "Crisp summary under 12 words",
-      "is_evidence_verified": true,
-      "verification_reason": "...",
-      "needs_followup": false,
-      "followup_question": "",
-      "voice_feedback": "..."
+            response = model.generate_content([prompt, image_part])
+            raw_text = response.text.strip()
+            
+            # Clean possible markdown block
+            if raw_text.startswith("```json"):
+                raw_text = raw_text[7:]
+            if raw_text.startswith("```"):
+                raw_text = raw_text[3:]
+            if raw_text.endswith("```"):
+                raw_text = raw_text[:-3]
+
+            triage_data = json.loads(raw_text.strip())
+            print(f"[Gemini Vision Verification]: {triage_data}")
+            return full_transcript, triage_data
+
+        except Exception as e:
+            print(f"[Gemini Vision Error]: {e}")
+
+    # Fallback if Gemini unavailable
+    dept = "Sanitation" if any(w in full_transcript for w in ["कचड़ा", "गंदगी", "नाली"]) else "Water Supply"
+    triage_data = {
+        "department": dept,
+        "urgency": 3,
+        "summary": full_transcript[:30],
+        "is_evidence_verified": True,
+        "verification_reason": "Shikayat jaanch ke liye darj ki gayi.",
+        "needs_followup": False,
+        "followup_question": "",
+        "voice_feedback": f"Aapki shikayat {dept} vibhag me darj ho gayi hai."
     }
-    """
-
-    model_name = get_active_model()
-    try:
-        chat_completion = groq_client.chat.completions.create(
-            model=model_name,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Citizen Complaint Transcript: '{full_transcript}'"}
-            ],
-            temperature=0.1
-        )
-        triage_data = json.loads(chat_completion.choices[0].message.content)
-    except Exception as err:
-        print(f"[AI Evaluation Error]: {err}")
-        # Rule based sensible fallback
-        dept = "Sanitation"
-        if any(w in full_transcript for w in ["पानी", "नल", "हैंड पंप", "जल"]):
-            dept = "Water Supply"
-        elif any(w in full_transcript for w in ["सड़क", "रास्ता", "गड्ढा"]):
-            dept = "Roads & Transport"
-        elif any(w in full_transcript for w in ["बिजली", "लाइट", "तार"]):
-            dept = "Electricity"
-
-        triage_data = {
-            "department": dept,
-            "urgency": 3,
-            "summary": full_transcript[:30],
-            "is_evidence_verified": True,
-            "verification_reason": "Shikayat darj ki gayi.",
-            "needs_followup": False,
-            "followup_question": "",
-            "voice_feedback": f"Aapki shikayat {dept} vibhag me darj ho gayi hai."
-        }
-
     return full_transcript, triage_data
