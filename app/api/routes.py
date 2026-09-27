@@ -3,6 +3,7 @@ from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from pydantic import BaseModel
 from app.services.ai_service import process_audio_and_triage
 from app.services.db_service import upload_file_to_storage, supabase
+from app.services.whatsapp_service import send_grievance_whatsapp_alert
 
 router = APIRouter()
 
@@ -67,7 +68,7 @@ async def submit_grievance(
         audio_bytes = await audio.read()
         image_bytes = await image.read()
 
-        # Simple Geo-fence validation (MP / Bihar / UP range check)
+        # Geofence Validation
         is_geo_valid = (20.0 <= latitude <= 30.0) and (73.0 <= longitude <= 89.0)
         if not is_geo_valid:
             return {
@@ -89,7 +90,6 @@ async def submit_grievance(
             previous_context=previous_context
         )
 
-        # Priority 1: Evidence Mismatch Check
         if not triage.get("is_evidence_verified", True):
             reason = triage.get("verification_reason", "Photo aapki samasya se match nahi ho rahi hai.")
             return {
@@ -100,7 +100,6 @@ async def submit_grievance(
                 "triage": triage
             }
 
-        # Priority 2: Smart Follow-up (Missing Ward/Landmark)
         if triage.get("needs_followup", False):
             question = triage.get("followup_question", "Kripya batayein ye samasya kaunse ward me hai?")
             return {
@@ -129,6 +128,20 @@ async def submit_grievance(
         }
         res = supabase.table("grievances").insert(data).execute()
         record_id = res.data[0]["id"] if res.data else "LOCAL-TX-OK"
+
+        # WhatsApp alert trigger yahan chalta hai
+        if user_phone:
+            try:
+                send_grievance_whatsapp_alert(
+                    to_phone=user_phone,
+                    citizen_name=user_name,
+                    ticket_id=str(record_id),
+                    department=triage.get('department', 'General'),
+                    ward=user_ward,
+                    district=user_district
+                )
+            except Exception as w_err:
+                print(f"[WhatsApp Trigger Failed]: {w_err}")
 
         return {
             "success": True,
