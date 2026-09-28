@@ -24,31 +24,42 @@ class CitizenLoginRequest(BaseModel):
     gender: str = ""
 
 # ---------------------------------------------------------
-# Route 1: Smart Pravesh OCR Extractor
+# Route 1: Smart Pravesh OCR & Authenticity Verifier
 # ---------------------------------------------------------
 @router.post("/extract-id-details")
 async def extract_id_details(card_image: UploadFile = File(...)):
     """
-    Identity card se Name, ID Number aur Gender extract karta hai.
-    Gemini vision model cascade use karta hai taaki quota issue na ho.
+    Identity card se Name, ID Number aur Gender extract karta hai
+    aur mandatory disclaimer text check karke authenticity verify karta hai.
     """
     try:
         image_bytes = await card_image.read()
         candidate_models = ["gemini-flash-latest", "gemini-3.1-flash-lite"]
 
         prompt = """
-        You are an Indian Government ID OCR parser for citizen services.
-        Inspect the uploaded identity card image and extract:
-        1. Full Name of the card holder
-        2. 12-digit Identity Number (digits only, remove all spaces)
-        3. Gender/Sex (Male, Female, or Other)
+        You are an Indian Government ID OCR and Authenticity Verification tool.
+        Examine this document photo carefully (Note: the image might be rotated or vertical).
 
-        Output strict JSON format only:
+        Task 1: Verify Authenticity
+        Check if the document contains standard government authenticity text, specifically:
+        - "Aadhaar is proof of identity, not of citizenship" or "आधार पहचान का प्रमाण है"
+        - Or "Government of India" / "भारत सरकार"
+        Set "is_authentic" to true if these official markers/disclaimers exist, else false.
+
+        Task 2: Extract Details
+        1. Full Name of the individual (person's actual name, e.g. "Devansh Kumar Bhargava", not government titles).
+        2. 12-digit numeric identity number (extract clean 12 digits, remove spaces).
+        3. Gender / Sex (Male / Female / Transgender).
+
+        Respond with STRICT JSON only in this exact format:
         {
+          "is_authentic": true,
           "name": "Full Name",
           "id_number": "12-digit number",
-          "gender": "Male / Female / Other"
+          "gender": "Male"
         }
+
+        Do not output markdown explanations. If blurry, put empty string "" for fields.
         """
 
         raw_text = ""
@@ -58,7 +69,7 @@ async def extract_id_details(card_image: UploadFile = File(...)):
                 mime = card_image.content_type or "image/jpeg"
                 image_part = {"mime_type": mime, "data": image_bytes}
                 response = model.generate_content([prompt, image_part])
-                raw_text = response.text.strip()
+                raw_text = (response.text or "").strip()
                 if raw_text:
                     break
             except Exception as model_err:
@@ -66,22 +77,50 @@ async def extract_id_details(card_image: UploadFile = File(...)):
                 continue
 
         if not raw_text:
-            return {"success": False, "data": {"name": "", "id_number": "", "gender": ""}}
+            return {
+                "success": False,
+                "is_authentic": False,
+                "message": "Model response empty",
+                "data": {"name": "", "id_number": "", "gender": ""}
+            }
 
-        if raw_text.startswith("```json"):
-            raw_text = raw_text[7:]
-        if raw_text.startswith("```"):
-            raw_text = raw_text[3:]
-        if raw_text.endswith("```"):
-            raw_text = raw_text[:-3]
+        clean_json = raw_text
+        if clean_json.startswith("```json"):
+            clean_json = clean_json[7:]
+        if clean_json.startswith("```"):
+            clean_json = clean_json[3:]
+        if clean_json.endswith("```"):
+            clean_json = clean_json[:-3]
+        clean_json = clean_json.strip()
 
-        parsed = json.loads(raw_text.strip())
-        print(f"[OCR Extracted Data]: {parsed}")
-        return {"success": True, "data": parsed}
+        parsed = json.loads(clean_json)
+        print(f"[OCR Verification Result]: {parsed}")
+
+        is_authentic = parsed.get("is_authentic", True)
+        extracted_name = str(parsed.get("name") or "").strip()
+        extracted_id = str(parsed.get("id_number") or "").replace(" ", "").replace("-", "").strip()
+        extracted_gender = str(parsed.get("gender") or "").strip()
+
+        data_result = {
+            "name": "" if extracted_name.lower() in ["none", "null", "full name"] else extracted_name,
+            "id_number": "" if extracted_id.lower() in ["none", "null"] else extracted_id,
+            "gender": "" if extracted_gender.lower() in ["none", "null"] else extracted_gender
+        }
+
+        return {
+            "success": True,
+            "is_authentic": is_authentic,
+            "data": data_result
+        }
 
     except Exception as e:
-        print(f"[OCR Endpoint Exception]: {e}")
-        return {"success": False, "data": {"name": "", "id_number": "", "gender": ""}}
+        print(f"[OCR Critical Error]: {e}")
+        traceback.print_exc()
+        return {
+            "success": False,
+            "is_authentic": False,
+            "data": {"name": "", "id_number": "", "gender": ""}
+        }
 
 # ---------------------------------------------------------
 # Route 2: Citizen Login & Registration
@@ -138,7 +177,7 @@ async def submit_grievance(
     previous_context: str = Form("")
 ):
     try:
-        print(f"[1] Grievance Intake: {user_name} ({user_phone}) | Location: {user_ward}, {user_district}, {user_state} | Coordinates: ({latitude}, {longitude})")
+        print(f"[1] Grievance Intake: {user_name} ({user_phone}) | Location: {user_ward}, {user_district}, {user_state} | GPS: ({latitude}, {longitude})")
         audio_bytes = await audio.read()
         image_bytes = await image.read()
 
@@ -164,7 +203,6 @@ async def submit_grievance(
             previous_context=previous_context
         )
 
-        # Cross-verification check between voice complaint & photo evidence
         if not triage.get("is_evidence_verified", True):
             reason = triage.get("verification_reason", "Tasveer aapki aawaz me batayi samasya se mel nahi khati.")
             return {
@@ -175,7 +213,6 @@ async def submit_grievance(
                 "triage": triage
             }
 
-        # Followup needed condition check
         if triage.get("needs_followup", False):
             question = triage.get("followup_question", "Kripya batayein ye samasya kaunse ward me sthit hai?")
             return {
