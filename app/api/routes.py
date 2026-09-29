@@ -41,32 +41,34 @@ def health_check():
 @router.post("/extract-id-details")
 async def extract_id_details(card_image: UploadFile = File(...)):
     """
-    Identity card photo (horizontal ya rotated) se Name, ID Number aur Gender extract karta hai
-    aur standard government markers / disclaimer check karke authenticity verify karta hai.
+    Identity card se Name, ID Number aur Gender reliably extract karta hai.
+    Rate-limit se bachne ke liye gemini-3.1-flash-lite aur gemini-2.5-flash use karta hai.
     """
-    print(f"\n[Smart Pravesh OCR]: Incoming image file -> {card_image.filename}")
+    print(f"\n[Smart Pravesh OCR]: Incoming image -> {card_image.filename}")
     try:
         image_bytes = await card_image.read()
-        print(f"[Smart Pravesh OCR]: Read {len(image_bytes)} bytes successfully.")
+        print(f"[Smart Pravesh OCR]: Read {len(image_bytes)} bytes.")
 
-        candidate_models = ["gemini-flash-latest", "gemini-3.1-flash-lite"]
+        # Updated model sequence: flash-lite first to avoid quota 429
+        candidate_models = ["gemini-3.1-flash-lite", "gemini-2.5-flash"]
 
         prompt = """
         You are an Indian Government ID OCR and Authenticity Verification tool.
-        Examine this document photo carefully (Note: the image might be rotated or vertical).
+        The document image may be rotated 90, 180, or 270 degrees, vertical, or captured with glare.
 
-        Task 1: Verify Authenticity
-        Check if the document contains standard government authenticity text or markers, specifically:
+        Step 1: Check Authenticity
+        Look for any standard official indicator such as:
         - "Aadhaar is proof of identity, not of citizenship" or "आधार पहचान का प्रमाण है"
-        - Or "Government of India" / "भारत सरकार"
-        Set "is_authentic" to true if these official markers exist, else false.
+        - "Government of India" / "भारत सरकार" / Ashoka emblem / UIDAI logo.
+        If found, set "is_authentic": true, otherwise false.
 
-        Task 2: Extract Details
-        1. Full Name of the individual (person's actual name, e.g. "Devansh Kumar Bhargava", not government labels).
-        2. 12-digit numeric identity number (extract clean 12 digits, remove spaces or dashes).
+        Step 2: Read Text in Hindi & English
+        Extract:
+        1. Person's Full Name (e.g. "Devansh Kumar Bhargava", ignoring government labels).
+        2. 12-digit numeric identification number (digits only, ignore spaces).
         3. Gender / Sex (Male / Female / Transgender).
 
-        Respond with STRICT JSON format only:
+        Return ONLY valid raw JSON:
         {
           "is_authentic": true,
           "name": "Full Name",
@@ -74,33 +76,27 @@ async def extract_id_details(card_image: UploadFile = File(...)):
           "gender": "Male"
         }
 
-        Do not output any markdown explanations. If blurry, put empty string "" for fields.
+        Do not wrap in markdown tags if possible.
         """
 
         raw_text = ""
         for model_name in candidate_models:
             try:
-                print(f"[Smart Pravesh OCR]: Attempting extraction via {model_name}...")
+                print(f"[Smart Pravesh OCR]: Calling {model_name}...")
                 model = genai.GenerativeModel(model_name)
                 mime = card_image.content_type or "image/jpeg"
                 response = model.generate_content([prompt, {"mime_type": mime, "data": image_bytes}])
                 raw_text = (response.text or "").strip()
                 if raw_text:
-                    print(f"[Smart Pravesh OCR]: Successfully extracted using {model_name}.")
+                    print(f"[Smart Pravesh OCR]: Response received from {model_name}.")
                     break
             except Exception as model_err:
-                print(f"[Smart Pravesh OCR Warning]: {model_name} failed: {model_err}")
+                print(f"[Smart Pravesh OCR]: {model_name} failed: {model_err}")
                 continue
 
         if not raw_text:
-            print("[Smart Pravesh OCR Error]: Both AI models returned empty response.")
-            return {
-                "success": False,
-                "is_authentic": False,
-                "data": {"name": "", "id_number": "", "gender": ""}
-            }
+            return {"success": False, "is_authentic": False, "data": {"name": "", "id_number": "", "gender": ""}}
 
-        # Clean JSON Markdown
         clean = raw_text
         if clean.startswith("```json"):
             clean = clean[7:]
@@ -117,7 +113,7 @@ async def extract_id_details(card_image: UploadFile = File(...)):
         id_val = str(parsed.get("id_number") or "").replace(" ", "").replace("-", "").strip()
         gender_val = str(parsed.get("gender") or "").strip()
 
-        result_data = {
+        data_result = {
             "name": "" if name_val.lower() in ["none", "null", "full name"] else name_val,
             "id_number": "" if id_val.lower() in ["none", "null"] else id_val,
             "gender": "" if gender_val.lower() in ["none", "null"] else gender_val
@@ -126,17 +122,13 @@ async def extract_id_details(card_image: UploadFile = File(...)):
         return {
             "success": True,
             "is_authentic": parsed.get("is_authentic", True),
-            "data": result_data
+            "data": data_result
         }
 
     except Exception as e:
-        print(f"[Smart Pravesh OCR Critical Error]: {e}")
+        print(f"[Smart Pravesh OCR Exception]: {e}")
         traceback.print_exc()
-        return {
-            "success": False,
-            "is_authentic": False,
-            "data": {"name": "", "id_number": "", "gender": ""}
-        }
+        return {"success": False, "is_authentic": False, "data": {"name": "", "id_number": "", "gender": ""}}
 
 # ---------------------------------------------------------
 # Route 2: Citizen Login & Profile Upsert
