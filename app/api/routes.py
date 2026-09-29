@@ -1,5 +1,4 @@
 import os
-import re
 import json
 import traceback
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
@@ -33,37 +32,35 @@ def health_check():
     return {
         "status": "healthy",
         "service": "gramsetu-core-backend",
-        "version": "2.5.0"
+        "version": "2.4.0"
     }
 
 # ---------------------------------------------------------
-# Route 1: Smart Pravesh OCR (Anti-Hallucination + Strict Regex)
+# Route 1: Smart Pravesh OCR & Card Authenticity Extraction
 # ---------------------------------------------------------
 @router.post("/extract-id-details")
 async def extract_id_details(card_image: UploadFile = File(...)):
     """
-    Identity card se bina kisi hallucination ke exact printed text extract karta hai.
+    Indian Government ID card se actual details extract karta hai bina kisi hardcoded dummy data ke.
     """
-    print(f"\n[Smart Pravesh OCR]: Image received -> {card_image.filename}")
+    print(f"\n[Smart Pravesh OCR]: Incoming image file -> {card_image.filename}")
     try:
         image_bytes = await card_image.read()
-        print(f"[Smart Pravesh OCR]: Bytes read: {len(image_bytes)}")
+        print(f"[Smart Pravesh OCR]: Read {len(image_bytes)} bytes successfully.")
 
-        # Strict Prompt to prevent public-figure hallucination
+        candidate_models = ["gemini-3.1-flash-lite", "gemini-2.5-flash"]
+
         prompt = """
-        You are a strict, raw OCR document parser.
-        CRITICAL RULES:
-        1. Read ONLY the literal words and numbers visibly printed on THIS image.
-        2. DO NOT GUESS, hallucinate, or insert famous public figures, leaders, or sample names.
-        3. If any field is unreadable, blurry, or missing, output an empty string "".
+        You are an Indian Government ID OCR engine.
+        Analyze this image carefully. Note that the card may be vertical, landscape, or upside down.
 
-        Tasks:
-        - Check if official markers exist ("Government of India", "भारत सरकार", Ashoka emblem, or disclaimer text).
-        - Find the cardholder's exact printed Name (in English or Hindi).
-        - Find the 12-digit number (usually printed prominently in 3 blocks of 4 digits).
-        - Find Gender / Sex (Male / Female / Transgender).
+        Extract ONLY the real information printed on THIS specific document:
+        1. Name: The actual full name of the cardholder printed on the card (written in English/Latin or Hindi script). Do NOT invent names.
+        2. ID Number: The 12-digit Aadhaar / ID number printed in large bold digits, typically formatted as three groups of 4 digits (e.g. 4 digits space 4 digits space 4 digits). Strip all spaces and return exactly 12 digits. Do not pick barcode numbers, issue dates, or phone numbers.
+        3. Gender: "Male", "Female", or "Transgender" based on what is printed next to Gender / Ling / Sex.
+        4. is_authentic: Set to true if the card has government text like "Government of India", "भारत सरकार", or the standard disclaimer text.
 
-        Return ONLY a single valid JSON object:
+        Return strict JSON only without any markdown formatting:
         {
           "is_authentic": true,
           "name": "",
@@ -72,11 +69,23 @@ async def extract_id_details(card_image: UploadFile = File(...)):
         }
         """
 
-        model = genai.GenerativeModel("gemini-3.1-flash-lite")
-        mime = card_image.content_type or "image/jpeg"
-        response = model.generate_content([prompt, {"mime_type": mime, "data": image_bytes}])
-        raw_text = (response.text or "").strip()
-        print(f"[Raw OCR Response]: {raw_text}")
+        raw_text = ""
+        for model_name in candidate_models:
+            try:
+                print(f"[Smart Pravesh OCR]: Calling {model_name}...")
+                model = genai.GenerativeModel(model_name)
+                mime = card_image.content_type or "image/jpeg"
+                response = model.generate_content([prompt, {"mime_type": mime, "data": image_bytes}])
+                raw_text = (response.text or "").strip()
+                if raw_text:
+                    print(f"[Smart Pravesh OCR]: Response received from {model_name}.")
+                    break
+            except Exception as model_err:
+                print(f"[Smart Pravesh OCR]: {model_name} failed: {model_err}")
+                continue
+
+        if not raw_text:
+            return {"success": False, "is_authentic": False, "data": {"name": "", "id_number": "", "gender": ""}}
 
         clean = raw_text
         if clean.startswith("```json"):
@@ -88,35 +97,18 @@ async def extract_id_details(card_image: UploadFile = File(...)):
         clean = clean.strip()
 
         parsed = json.loads(clean)
-        
-        extracted_name = str(parsed.get("name") or "").strip()
-        extracted_id = str(parsed.get("id_number") or "").replace(" ", "").replace("-", "").strip()
-        extracted_gender = str(parsed.get("gender") or "").strip()
+        print(f"[Smart Pravesh OCR Parsed]: {parsed}")
 
-        # Blacklist common hallucinations
-        hallucination_names = [
-            "narendra modi", "narendra damodardas modi", "rahul gandhi",
-            "sample user", "full name", "devansh kumar bhargava"
-        ]
-        if extracted_name.lower() in hallucination_names:
-            extracted_name = ""
-
-        # Validate 12-digit format strictly
-        if not (extracted_id.isdigit() and len(extracted_id) == 12):
-            # Try to regex search inside raw response if model outputted formatted text
-            digit_matches = re.findall(r'\b\d{4}\s?\d{4}\s?\d{4}\b', raw_text)
-            if digit_matches:
-                extracted_id = digit_matches[0].replace(" ", "")
-            else:
-                extracted_id = ""
+        name_val = str(parsed.get("name") or "").strip()
+        id_val = str(parsed.get("id_number") or "").replace(" ", "").replace("-", "").strip()
+        gender_val = str(parsed.get("gender") or "").strip()
 
         data_result = {
-            "name": extracted_name,
-            "id_number": extracted_id,
-            "gender": extracted_gender
+            "name": name_val,
+            "id_number": id_val,
+            "gender": gender_val
         }
 
-        print(f"[Smart Pravesh Final Parsed]: {data_result}")
         return {
             "success": True,
             "is_authentic": parsed.get("is_authentic", True),
@@ -126,18 +118,13 @@ async def extract_id_details(card_image: UploadFile = File(...)):
     except Exception as e:
         print(f"[Smart Pravesh OCR Exception]: {e}")
         traceback.print_exc()
-        return {
-            "success": False,
-            "is_authentic": False,
-            "data": {"name": "", "id_number": "", "gender": ""}
-        }
-
+        return {"success": False, "is_authentic": False, "data": {"name": "", "id_number": "", "gender": ""}}
 # ---------------------------------------------------------
-# Route 2: Citizen Login & Registration
+# Route 2: Citizen Login & Profile Upsert
 # ---------------------------------------------------------
 @router.post("/citizen-login")
 def citizen_login(req: CitizenLoginRequest):
-    print(f"\n[Citizen Auth]: {req.name} ({req.phone})")
+    print(f"\n[Citizen Auth]: Login initiated for {req.name} (Phone: {req.phone})")
     try:
         res = supabase.table("citizens").select("*").eq("phone", req.phone).execute()
         update_data = {
@@ -151,29 +138,37 @@ def citizen_login(req: CitizenLoginRequest):
         }
 
         if res.data and len(res.data) > 0:
+            print(f"[Citizen Auth]: Updating existing record for {req.phone}")
             supabase.table("citizens").update(update_data).eq("phone", req.phone).execute()
         else:
+            print(f"[Citizen Auth]: Creating fresh record for {req.phone}")
             update_data["phone"] = req.phone
             supabase.table("citizens").insert(update_data).execute()
 
+        print("[Citizen Auth]: Session established successfully in Supabase.")
         return {"success": True, "message": "Citizen logged in successfully"}
+
     except Exception as e:
-        print(f"[Citizen Auth Fallback]: {e}")
-        return {"success": True, "message": "Fallback session active"}
+        print(f"[Citizen Auth Supabase Error - Safe Fallback]: {e}")
+        traceback.print_exc()
+        return {"success": True, "message": "Fallback session continued"}
 
 # ---------------------------------------------------------
-# Route 3: Fetch Grievances
+# Route 3: Fetch Citizen Grievance History
 # ---------------------------------------------------------
 @router.get("/user-grievances")
 def get_user_grievances(phone: str):
+    print(f"[Fetch Tickets]: Getting complaints list for citizen {phone}")
     try:
         res = supabase.table("grievances").select("*").eq("citizen_phone", phone).order("created_at", desc=True).execute()
         return res.data if res.data else []
     except Exception as e:
+        print(f"[Fetch Tickets Error]: {e}")
+        traceback.print_exc()
         return []
 
 # ---------------------------------------------------------
-# Route 4: Multimodal Grievance Triage Pipeline
+# Route 4: Complete Multimodal Grievance Triage Pipeline
 # ---------------------------------------------------------
 @router.post("/submit-grievance")
 async def submit_grievance(
@@ -188,42 +183,74 @@ async def submit_grievance(
     longitude: float = Form(77.4126),
     previous_context: str = Form("")
 ):
+    """
+    Core AI Pipeline:
+    1. Geofence Boundary Check (Latitude/Longitude validation)
+    2. Upload raw audio & image evidence to Supabase Storage
+    3. Multimodal cross-verification (Audio vs Image match)
+    4. Follow-up inquiry generator for vague complaints
+    5. Final ticket registration in Supabase Grievance table
+    """
     try:
-        # 1. Geofence Boundary Check (Indian bounds)
+        print(f"\n=======================================================")
+        print(f"[Grievance Intake]: Citizen {user_name} ({user_phone})")
+        print(f"[Grievance Location]: {user_ward}, {user_district}, {user_state}")
+        print(f"[Grievance GPS]: Lat: {latitude}, Long: {longitude}")
+        print(f"=======================================================")
+
+        # 1. Geofence Check for Indian Territory (8.0 to 37.0 N, 68.0 to 97.5 E)
         is_geo_valid = (8.0 <= latitude <= 37.0) and (68.0 <= longitude <= 97.5)
         if not is_geo_valid:
+            print(f"[Geofence Violation]: Coordinates ({latitude}, {longitude}) outside valid boundary!")
             return {
                 "success": False,
                 "status": "REJECTED_GEOTAG_MISMATCH",
-                "voice_feedback": "Aapki vartaman sthiti chune hue kshetra se bahar hai. Sahi sthal se shikayat darj karein.",
+                "voice_feedback": "Aapki vartaman sthiti chune hue kshetra se mel nahi khati. Kripya sahi sthal se shikayat darj karein.",
                 "transcript": ""
             }
 
+        # 2. Read bytes for parallel processing
         audio_bytes = await audio.read()
         image_bytes = await image.read()
 
+        print("[Storage]: Uploading evidence files to Supabase...")
         audio_url = await upload_file_to_storage(audio_bytes, "m4a", "audios")
         image_url = await upload_file_to_storage(image_bytes, "jpg", "images")
+        print(f"[Storage Done]: Audio -> {audio_url} | Image -> {image_url}")
 
+        # 3. AI Multimodal Triage (Audio Transcription + Vision Verification)
+        print("[AI Engine]: Processing audio transcription and multimodal vision verification...")
         transcript, triage = await process_audio_and_triage(
             audio_bytes=audio_bytes,
             filename=audio.filename or "voice.m4a",
             image_bytes=image_bytes,
             previous_context=previous_context
         )
+        print(f"[AI Transcript]: {transcript}")
+        print(f"[AI Triage Output]: {triage}")
 
+        # 4. Strict Evidence Cross-Validation Check
         if not triage.get("is_evidence_verified", True):
-            reason = triage.get("verification_reason", "Tasveer aawaz me batayi samasya se mel nahi khati.")
+            reason = triage.get(
+                "verification_reason",
+                "Tasveer aapki aawaz me batayi gayi samasya se mel nahi kha rahi hai."
+            )
+            print(f"[Validation Failed]: {reason}")
             return {
                 "success": False,
                 "status": "REJECTED_EVIDENCE_MISMATCH",
-                "voice_feedback": f"Dhyan dein, {reason} Kripya sahi tasveer upload karein.",
+                "voice_feedback": f"Dhyan dein, {reason} Kripya samasya ki sachhi tasveer khinchein.",
                 "transcript": transcript,
                 "triage": triage
             }
 
+        # 5. Missing Information / Follow-up Inquiry Check
         if triage.get("needs_followup", False):
-            question = triage.get("followup_question", "Kripya samasya ka thik sthan batayein.")
+            question = triage.get(
+                "followup_question",
+                "Kripya samasya ka thik sthan ya ward batayein taaki hum karwayi shuru kar sakein."
+            )
+            print(f"[Followup Required]: {question}")
             return {
                 "success": False,
                 "status": "NEEDS_FOLLOWUP",
@@ -232,6 +259,8 @@ async def submit_grievance(
                 "triage": triage
             }
 
+        # 6. Save Verified Complaint Record in Supabase
+        print("[Database]: Registering verified ticket in Supabase...")
         ticket_payload = {
             "transcript": transcript,
             "department": triage.get("department", "Other"),
@@ -252,11 +281,13 @@ async def submit_grievance(
         ticket_id = res.data[0]["id"] if (res.data and len(res.data) > 0) else "TX-VERIFIED"
         dept = triage.get("department", "Sambandhit")
 
+        print(f"[Database Success]: Ticket #{ticket_id} created for {dept} department.")
+
         return {
             "success": True,
             "status": "FILED",
             "ticket_id": ticket_id,
-            "voice_feedback": f"Aapki shikayat {dept} vibhag me darj ho chuki hai.",
+            "voice_feedback": f"Aapki shikayat safalta-purvak {dept} vibhag me darj ho chuki hai.",
             "transcript": transcript,
             "triage": triage,
             "audio_url": audio_url,
@@ -264,6 +295,6 @@ async def submit_grievance(
         }
 
     except Exception as e:
-        print(f"[Submit Grievance Failure]: {e}")
+        print(f"[Submit Grievance Critical Failure]: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
