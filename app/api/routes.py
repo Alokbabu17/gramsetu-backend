@@ -41,42 +41,32 @@ def health_check():
 @router.post("/extract-id-details")
 async def extract_id_details(card_image: UploadFile = File(...)):
     """
-    Identity card se Name, ID Number aur Gender reliably extract karta hai.
-    Rate-limit se bachne ke liye gemini-3.1-flash-lite aur gemini-2.5-flash use karta hai.
+    Indian Government ID card se actual details extract karta hai bina kisi hardcoded dummy data ke.
     """
-    print(f"\n[Smart Pravesh OCR]: Incoming image -> {card_image.filename}")
+    print(f"\n[Smart Pravesh OCR]: Incoming image file -> {card_image.filename}")
     try:
         image_bytes = await card_image.read()
-        print(f"[Smart Pravesh OCR]: Read {len(image_bytes)} bytes.")
+        print(f"[Smart Pravesh OCR]: Read {len(image_bytes)} bytes successfully.")
 
-        # Updated model sequence: flash-lite first to avoid quota 429
         candidate_models = ["gemini-3.1-flash-lite", "gemini-2.5-flash"]
 
         prompt = """
-        You are an Indian Government ID OCR and Authenticity Verification tool.
-        The document image may be rotated 90, 180, or 270 degrees, vertical, or captured with glare.
+        You are an Indian Government ID OCR engine.
+        Analyze this image carefully. Note that the card may be vertical, landscape, or upside down.
 
-        Step 1: Check Authenticity
-        Look for any standard official indicator such as:
-        - "Aadhaar is proof of identity, not of citizenship" or "आधार पहचान का प्रमाण है"
-        - "Government of India" / "भारत सरकार" / Ashoka emblem / UIDAI logo.
-        If found, set "is_authentic": true, otherwise false.
+        Extract ONLY the real information printed on THIS specific document:
+        1. Name: The actual full name of the cardholder printed on the card (written in English/Latin or Hindi script). Do NOT invent names.
+        2. ID Number: The 12-digit Aadhaar / ID number printed in large bold digits, typically formatted as three groups of 4 digits (e.g. 4 digits space 4 digits space 4 digits). Strip all spaces and return exactly 12 digits. Do not pick barcode numbers, issue dates, or phone numbers.
+        3. Gender: "Male", "Female", or "Transgender" based on what is printed next to Gender / Ling / Sex.
+        4. is_authentic: Set to true if the card has government text like "Government of India", "भारत सरकार", or the standard disclaimer text.
 
-        Step 2: Read Text in Hindi & English
-        Extract:
-        1. Person's Full Name (e.g. "Devansh Kumar Bhargava", ignoring government labels).
-        2. 12-digit numeric identification number (digits only, ignore spaces).
-        3. Gender / Sex (Male / Female / Transgender).
-
-        Return ONLY valid raw JSON:
+        Return strict JSON only without any markdown formatting:
         {
           "is_authentic": true,
-          "name": "Full Name",
-          "id_number": "123456789012",
-          "gender": "Male"
+          "name": "",
+          "id_number": "",
+          "gender": ""
         }
-
-        Do not wrap in markdown tags if possible.
         """
 
         raw_text = ""
@@ -114,9 +104,9 @@ async def extract_id_details(card_image: UploadFile = File(...)):
         gender_val = str(parsed.get("gender") or "").strip()
 
         data_result = {
-            "name": "" if name_val.lower() in ["none", "null", "full name"] else name_val,
-            "id_number": "" if id_val.lower() in ["none", "null"] else id_val,
-            "gender": "" if gender_val.lower() in ["none", "null"] else gender_val
+            "name": name_val,
+            "id_number": id_val,
+            "gender": gender_val
         }
 
         return {
@@ -129,7 +119,6 @@ async def extract_id_details(card_image: UploadFile = File(...)):
         print(f"[Smart Pravesh OCR Exception]: {e}")
         traceback.print_exc()
         return {"success": False, "is_authentic": False, "data": {"name": "", "id_number": "", "gender": ""}}
-
 # ---------------------------------------------------------
 # Route 2: Citizen Login & Profile Upsert
 # ---------------------------------------------------------
