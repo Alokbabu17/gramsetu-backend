@@ -1,8 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.routes import router
+from app.api.routes import router as api_router, get_admin_dashboard
 
-app = FastAPI(title="GramSetu AI Engine")
+app = FastAPI(title="GramSetu API", version="3.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -12,4 +12,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(router, prefix="/api")
+# Root level /admin endpoint (bina /api ke kholne ke liye)
+app.add_api_route("/admin", get_admin_dashboard, methods=["GET"])
+
+# Baaki saare routes /api ke sath
+app.include_router(api_router, prefix="/api")
